@@ -507,6 +507,16 @@ public class ESCPOSPrinter {
         buffer.write(BOLD_OFF);
         buffer.write(LINE_FEED);
 
+        if (ticket.getAmountTendered() != null && ticket.getAmountTendered().compareTo(BigDecimal.ZERO) > 0) {
+            buffer.write(("Recibido: $" + formatPrice(ticket.getAmountTendered())).getBytes(StandardCharsets.ISO_8859_1));
+            buffer.write(LINE_FEED);
+        }
+
+        if (ticket.getChangeDue() != null && ticket.getChangeDue().compareTo(BigDecimal.ZERO) > 0) {
+            buffer.write(("Cambio: $" + formatPrice(ticket.getChangeDue())).getBytes(StandardCharsets.ISO_8859_1));
+            buffer.write(LINE_FEED);
+        }
+
         buffer.write(ALIGN_LEFT);
     }
 

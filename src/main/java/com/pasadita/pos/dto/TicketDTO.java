@@ -24,6 +24,8 @@ public class TicketDTO {
     private BigDecimal subtotal;
     private BigDecimal discountAmount;
     private BigDecimal total;
+    private BigDecimal amountTendered;
+    private BigDecimal changeDue;
     private boolean paid;
     private String notes;
     private List<SaleDetailDTO> saleDetails;
@@ -159,6 +161,22 @@ public class TicketDTO {
         this.total = total;
     }
 
+    public BigDecimal getAmountTendered() {
+        return amountTendered;
+    }
+
+    public void setAmountTendered(BigDecimal amountTendered) {
+        this.amountTendered = amountTendered;
+    }
+
+    public BigDecimal getChangeDue() {
+        return changeDue;
+    }
+
+    public void setChangeDue(BigDecimal changeDue) {
+        this.changeDue = changeDue;
+    }
+
     public boolean isPaid() {
         return paid;
     }
@@ -202,6 +220,8 @@ public class TicketDTO {
                 ", subtotal=" + subtotal +
                 ", discountAmount=" + discountAmount +
                 ", total=" + total +
+                ", amountTendered=" + amountTendered +
+                ", changeDue=" + changeDue +
                 ", paid=" + paid +
                 ", notes='" + notes + '\'' +
                 ", saleDetails=" + saleDetails +
