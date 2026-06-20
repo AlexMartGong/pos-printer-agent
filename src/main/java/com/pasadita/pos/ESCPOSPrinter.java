@@ -82,6 +82,26 @@ public class ESCPOSPrinter {
         }
     }
 
+    /**
+     * Abre el cajón de dinero sin imprimir ticket.
+     * Envía únicamente el pulso ESC/POS de apertura de gaveta, reutilizando la
+     * misma lógica multiplataforma de print() (device en Linux, PrintService en Windows).
+     * Fire-and-forget: captura el error y lo registra, no lo propaga.
+     */
+    public void openCashDrawer() {
+        System.out.println("Enviando comando de apertura de cajon...");
+        try {
+            if (IS_WINDOWS) {
+                printToWindowsPrinter(OPEN_DRAWER, "Apertura de cajon");
+            } else {
+                printToLinuxDevice(OPEN_DRAWER, "Apertura de cajon");
+            }
+            System.out.println("[OK] Cajon abierto correctamente");
+        } catch (PrinterException e) {
+            System.err.println("[ERROR] No se pudo abrir el cajon: " + e.getMessage());
+        }
+    }
+
     private void printToLinuxDevice(byte[] data, String description) throws PrinterException {
         System.out.println("Escribiendo a impresora (Linux): " + printerPath);
 

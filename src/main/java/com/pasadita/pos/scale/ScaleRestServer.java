@@ -24,6 +24,7 @@ import java.util.concurrent.Executors;
 public class ScaleRestServer {
 
     private static final Logger logger = LoggerFactory.getLogger(ScaleRestServer.class);
+    private static final String ALLOWED_ORIGIN = "*";
     private static final int PORT = 8081;
 
     private HttpServer server;
@@ -321,9 +322,6 @@ public class ScaleRestServer {
         }
     }
 
-    // Origen permitido para CORS (frontend de producción)
-    private static final String ALLOWED_ORIGIN = "https://lapasadita.app";
-
     /**
      * Envía una respuesta JSON
      */
@@ -365,6 +363,7 @@ public class ScaleRestServer {
 
     /**
      * Maneja solicitudes OPTIONS preflight para CORS
+     *
      * @return true si fue una solicitud OPTIONS (ya manejada), false si debe continuar procesando
      */
     private boolean handleCorsPreflightIfOptions(HttpExchange exchange) {

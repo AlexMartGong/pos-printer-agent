@@ -1,5 +1,6 @@
 package com.pasadita.pos;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.pasadita.pos.dto.TicketDTO;
@@ -73,7 +74,15 @@ public class POSPrinterAgent extends WebSocketClient {
         log("INFO", "Mensaje recibido del servidor (" + message.length() + " bytes)");
 
         try {
-            TicketDTO ticket = objectMapper.readValue(message, TicketDTO.class);
+            JsonNode rootNode = objectMapper.readTree(message);
+
+            if (rootNode.has("type") && "OPEN_DRAWER".equals(rootNode.get("type").asText())) {
+                log("INFO", "Comando OPEN_DRAWER recibido - abriendo cajon");
+                printer.openCashDrawer();
+                return;
+            }
+
+            TicketDTO ticket = objectMapper.treeToValue(rootNode, TicketDTO.class);
             log("INFO", "Ticket #" + ticket.getId() + " parseado - Cliente: " + ticket.getCustomerName());
 
             printTicket(ticket);

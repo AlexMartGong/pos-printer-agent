@@ -20,6 +20,7 @@ This document summarizes essential knowledge and actionable conventions for AI a
   - Detects ticket type (cash register vs delivery) based on `deliveryOrderId` and `deliveryAddress`.
   - Cross-platform: Direct device file on Linux, Java PrintService on Windows.
   - 80mm printer support (42 chars/line), PC850 charset for Spanish.
+  - `openCashDrawer()`: opens the cash drawer with no ticket, emitting only the ESC/POS drawer-kick pulse (`{27,112,0,25,250}`) over the same cross-platform path as `print()`. Fire-and-forget: errors are logged, not propagated.
 
 - **Scale Integration** (`src/main/java/com/pasadita/pos/scale/`):
   - `TorreyScaleController`: Serial comms with Torrey PCR scales (jSerialComm).
@@ -29,8 +30,9 @@ This document summarizes essential knowledge and actionable conventions for AI a
     - `WeightReading` is a Java `record` (not a class).
   - `ScaleRestServer`: Lightweight HTTP server (port 8081, no Spring Boot).
     - Binds to loopback address only (`InetAddress.getLoopbackAddress()`) for security.
-    - Endpoints: `/api/scale/weight`, `/api/scale/status`, `/api/scale/connect`, `/api/scale/disconnect`, `/api/scale/ports`.
-    - CORS restricted to production origin `https://lapasadita.app` (not wildcard).
+    - Endpoints: `/api/scale/weight`, `/api/scale/status`, `/api/scale/connect`, `/api/scale/disconnect`, `/api/scale/ports`, `/api/station`.
+    - `/api/station` (GET): returns this agent's configured `stationId` as `{"stationId":"POS1"}` — `stationId` is passed into the `ScaleRestServer` constructor by `POSPrinterAgent.main`. The frontend caches it to tag sales.
+    - CORS: `ALLOWED_ORIGIN = "*"` (all origins).
 
 - **DTOs** (`src/main/java/com/pasadita/pos/dto/`):
   - `TicketDTO`, `SaleDetailDTO`: Data transfer objects for tickets and sale lines.
@@ -45,6 +47,7 @@ This document summarizes essential knowledge and actionable conventions for AI a
 ### 2. Data Flow & Protocols
 
 - Backend sends ticket JSON via WebSocket → `POSPrinterAgent` → `ESCPOSPrinter` → printer device.
+- `onMessage` reads the JSON tree first: a `{"type":"OPEN_DRAWER",...}` command kicks the cash drawer via `ESCPOSPrinter.openCashDrawer()` (no ticket, no confirmation); any other message is deserialized to `TicketDTO` and printed.
 - Confirmation JSON sent back to backend after print attempt.
 - Ticket type detection logic in `ESCPOSPrinter.isDeliveryOrder()`:
   - Delivery: `deliveryOrderId != null && deliveryAddress != null && !deliveryAddress.isEmpty()`
@@ -120,7 +123,7 @@ pos-printer-agent/
 
 - **WebSocket:** Main communication with backend for ticketing.
 - **Serial port:** For Torrey scale integration (configurable port).
-- **REST API:** For local scale access (port 8081, loopback only, CORS restricted to `https://lapasadita.app`).
+- **REST API:** For local scale access and `stationId` lookup (port 8081, loopback only, CORS `*`).
 
 ---
 

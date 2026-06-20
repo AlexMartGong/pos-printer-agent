@@ -95,6 +95,7 @@ Key properties in `config.properties`:
   - **Linux**: Writes directly to device file (`/dev/usb/lpX`) - no driver required
   - **Windows**: Uses Java PrintService with installed printer name - stable, no port changes
 - Supports 80mm thermal printers (42 chars/line), PC850 charset for Spanish
+- `openCashDrawer()`: opens the cash drawer standalone (no ticket), sending only the ESC/POS drawer-kick pulse (`{27,112,0,25,250}`) through the same cross-platform path as `print()`
 
 **Scale Integration** (`src/main/java/com/pasadita/pos/scale/`)
 - **TorreyScaleController**: Serial communication with Torrey PCR series scales via jSerialComm
@@ -107,12 +108,13 @@ Key properties in `config.properties`:
   - POST `/api/scale/connect` - Connect to scale
   - POST `/api/scale/disconnect` - Disconnect from scale
   - GET `/api/scale/ports` - List available serial ports
+  - GET `/api/station` - Returns this agent's configured stationId: `{"stationId":"POS1"}` (frontend caches it to tag sales)
   - CORS enabled for frontend integration
 
 ### Data Flow
 
 1. Backend creates sale/delivery order and sends ticket JSON via WebSocket
-2. `POSPrinterAgent.onMessage()` deserializes `TicketDTO` with Jackson
+2. `POSPrinterAgent.onMessage()` reads the JSON tree first: if `type=OPEN_DRAWER` it calls `ESCPOSPrinter.openCashDrawer()` and returns; otherwise it deserializes `TicketDTO` with Jackson
 3. `ESCPOSPrinter.print()` generates ESC/POS byte commands
 4. Commands written directly to printer device (e.g., `/dev/usb/lp0`)
 5. Confirmation JSON sent back to server with success/error status
@@ -132,7 +134,12 @@ Key properties in `config.properties`:
   ```
 
 **Incoming messages to agent:**
-- Full `TicketDTO` JSON object with `saleDetails` array
+- Full `TicketDTO` JSON object with `saleDetails` array (printed as a ticket)
+- `OPEN_DRAWER`: kick the cash drawer without printing
+  ```json
+  {"type":"OPEN_DRAWER","timestamp":"2025-01-12T14:30:00Z"}
+  ```
+  Sent by the backend when a cash payment is collected but no ticket is printed. `onMessage` inspects the `type` node before deserializing; messages with `type=OPEN_DRAWER` trigger `ESCPOSPrinter.openCashDrawer()`, anything else is parsed as a `TicketDTO`.
 
 ### Ticket Type Detection
 

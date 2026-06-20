@@ -74,6 +74,23 @@ sudo chmod 666 /dev/usb/lp0
 4. Los comandos se envían a la impresora térmica
 5. El agente envía confirmación de impresión al backend
 
+### Apertura de cajón sin ticket
+
+Cuando se cobra en efectivo sin imprimir ticket, el backend envía el comando
+`{"type":"OPEN_DRAWER","timestamp":"..."}` por WebSocket. El agente detecta el `type`
+y abre la gaveta (pulso ESC/POS) sin generar ticket.
+
+## API REST local
+
+El agente expone un servidor HTTP en `http://localhost:8081` (solo loopback) para integración
+con el frontend:
+
+- `GET /api/station` - Devuelve el ID de esta estación: `{"stationId":"POS1"}`
+- `GET /api/scale/weight` - Lee el peso actual de la báscula
+- `GET /api/scale/status` - Estado de conexión de la báscula
+- `POST /api/scale/connect` / `POST /api/scale/disconnect` - Conectar/desconectar báscula
+- `GET /api/scale/ports` - Lista los puertos serie disponibles
+
 ## Estructura del proyecto
 
 ```
@@ -84,8 +101,11 @@ pos-printer-agent/
 └── src/main/java/com/pasadita/pos/
     ├── POSPrinterAgent.java      # Clase principal, cliente WebSocket
     ├── ESCPOSPrinter.java        # Generador de comandos ESC/POS
-    └── dto/
-        ├── TicketDTO.java        # DTO del ticket
-        └── SaleDetailDTO.java    # DTO de detalles de venta
+    ├── dto/
+    │   ├── TicketDTO.java        # DTO del ticket
+    │   └── SaleDetailDTO.java    # DTO de detalles de venta
+    └── scale/
+        ├── TorreyScaleController.java  # Comunicación serial con báscula
+        └── ScaleRestServer.java        # API REST local (puerto 8081)
 ```
 
