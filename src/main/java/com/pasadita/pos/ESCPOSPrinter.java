@@ -14,6 +14,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class ESCPOSPrinter {
     private static final String DEFAULT_PRINTER_PATH = "/dev/usb/lp0";
@@ -49,6 +50,10 @@ public class ESCPOSPrinter {
     private final String printerPath;
     private final String printerName;
 
+    // El hardware no tolera escrituras concurrentes: lock fair (FIFO) serializa
+    // el acceso al dispositivo sin bloquear la generación de comandos ESC/POS.
+    private final ReentrantLock deviceLock = new ReentrantLock(true);
+
     public ESCPOSPrinter(String businessName, String businessAddress, String businessPhone,
                          String printerPath, String printerName) {
         this.businessName = businessName;
@@ -71,7 +76,6 @@ public class ESCPOSPrinter {
     }
 
     public void print(TicketDTO ticket) throws PrinterException, IOException {
-        System.out.println("Generando comandos ESC/POS...");
 
         byte[] commands = generateESCPOS(ticket);
 
@@ -89,7 +93,6 @@ public class ESCPOSPrinter {
      * Fire-and-forget: captura el error y lo registra, no lo propaga.
      */
     public void openCashDrawer() {
-        System.out.println("Enviando comando de apertura de cajon...");
         try {
             if (IS_WINDOWS) {
                 printToWindowsPrinter(OPEN_DRAWER, "Apertura de cajon");
@@ -103,39 +106,47 @@ public class ESCPOSPrinter {
     }
 
     private void printToLinuxDevice(byte[] data, String description) throws PrinterException {
-        System.out.println("Escribiendo a impresora (Linux): " + printerPath);
+        deviceLock.lock();
+        try {
 
-        try (FileOutputStream fos = new FileOutputStream(printerPath)) {
-            fos.write(data);
-            fos.flush();
-            System.out.println("[OK] " + description + " enviado a impresora correctamente");
-        } catch (IOException e) {
-            System.err.println("[ERROR] Error escribiendo a impresora: " + e.getMessage());
-            throw new PrinterException("No se pudo escribir en " + printerPath + ": " + e.getMessage(), e);
+            try (FileOutputStream fos = new FileOutputStream(printerPath)) {
+                fos.write(data);
+                fos.flush();
+                System.out.println("[OK] " + description + " enviado a impresora correctamente");
+            } catch (IOException e) {
+                System.err.println("[ERROR] Error escribiendo a impresora: " + e.getMessage());
+                throw new PrinterException("No se pudo escribir en " + printerPath + ": " + e.getMessage(), e);
+            }
+        } finally {
+            deviceLock.unlock();
         }
     }
 
     private void printToWindowsPrinter(byte[] data, String description) throws PrinterException {
-        String effectivePrinterName = getEffectivePrinterName();
-        System.out.println("Imprimiendo a impresora (Windows): " + effectivePrinterName);
-
-        PrintService printService = findPrintService(effectivePrinterName);
-        if (printService == null) {
-            throw new PrinterException("Impresora no encontrada: " + effectivePrinterName +
-                    ". Impresoras disponibles: " + getAvailablePrinters());
-        }
-
+        deviceLock.lock();
         try {
-            DocPrintJob printJob = printService.createPrintJob();
-            DocFlavor flavor = DocFlavor.BYTE_ARRAY.AUTOSENSE;
-            Doc doc = new SimpleDoc(data, flavor, null);
-            PrintRequestAttributeSet attributes = new HashPrintRequestAttributeSet();
+            String effectivePrinterName = getEffectivePrinterName();
 
-            printJob.print(doc, attributes);
-            System.out.println("[OK] " + description + " enviado a impresora correctamente");
-        } catch (javax.print.PrintException e) {
-            System.err.println("[ERROR] Error de impresión: " + e.getMessage());
-            throw new PrinterException("Error al imprimir en " + effectivePrinterName + ": " + e.getMessage(), e);
+            PrintService printService = findPrintService(effectivePrinterName);
+            if (printService == null) {
+                throw new PrinterException("Impresora no encontrada: " + effectivePrinterName +
+                        ". Impresoras disponibles: " + getAvailablePrinters());
+            }
+
+            try {
+                DocPrintJob printJob = printService.createPrintJob();
+                DocFlavor flavor = DocFlavor.BYTE_ARRAY.AUTOSENSE;
+                Doc doc = new SimpleDoc(data, flavor, null);
+                PrintRequestAttributeSet attributes = new HashPrintRequestAttributeSet();
+
+                printJob.print(doc, attributes);
+                System.out.println("[OK] " + description + " enviado a impresora correctamente");
+            } catch (javax.print.PrintException e) {
+                System.err.println("[ERROR] Error de impresión: " + e.getMessage());
+                throw new PrinterException("Error al imprimir en " + effectivePrinterName + ": " + e.getMessage(), e);
+            }
+        } finally {
+            deviceLock.unlock();
         }
     }
 
@@ -293,7 +304,6 @@ public class ESCPOSPrinter {
     }
 
     private void writeTicketInfoDelivery(ByteArrayOutputStream buffer, TicketDTO ticket) throws IOException {
-        System.out.println("Ticket: " + ticket.toString());
         buffer.write(ALIGN_LEFT);
 
         buffer.write(BOLD_ON);
@@ -507,12 +517,11 @@ public class ESCPOSPrinter {
         buffer.write(BOLD_OFF);
         buffer.write(LINE_FEED);
 
-        if (ticket.getAmountTendered() != null && ticket.getAmountTendered().compareTo(BigDecimal.ZERO) > 0) {
+        Long paymentMethodId = ticket.getPaymentMethodId();
+        boolean isCash = paymentMethodId != null && paymentMethodId == 1L;
+        if (isCash) {
             buffer.write(("Recibido: $" + formatPrice(ticket.getAmountTendered())).getBytes(StandardCharsets.ISO_8859_1));
             buffer.write(LINE_FEED);
-        }
-
-        if (ticket.getChangeDue() != null && ticket.getChangeDue().compareTo(BigDecimal.ZERO) > 0) {
             buffer.write(("Cambio: $" + formatPrice(ticket.getChangeDue())).getBytes(StandardCharsets.ISO_8859_1));
             buffer.write(LINE_FEED);
         }
@@ -554,7 +563,6 @@ public class ESCPOSPrinter {
     }
 
     public void printTestPage() throws PrinterException, IOException {
-        System.out.println("Generando página de prueba...");
 
         String printerInfo = IS_WINDOWS ? getEffectivePrinterName() : printerPath;
 
