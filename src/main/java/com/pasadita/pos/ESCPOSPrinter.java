@@ -50,8 +50,6 @@ public class ESCPOSPrinter {
     private final String printerPath;
     private final String printerName;
 
-    // El hardware no tolera escrituras concurrentes: lock fair (FIFO) serializa
-    // el acceso al dispositivo sin bloquear la generación de comandos ESC/POS.
     private final ReentrantLock deviceLock = new ReentrantLock(true);
 
     public ESCPOSPrinter(String businessName, String businessAddress, String businessPhone,
@@ -86,12 +84,6 @@ public class ESCPOSPrinter {
         }
     }
 
-    /**
-     * Abre el cajón de dinero sin imprimir ticket.
-     * Envía únicamente el pulso ESC/POS de apertura de gaveta, reutilizando la
-     * misma lógica multiplataforma de print() (device en Linux, PrintService en Windows).
-     * Fire-and-forget: captura el error y lo registra, no lo propaga.
-     */
     public void openCashDrawer() {
         try {
             if (IS_WINDOWS) {
@@ -154,7 +146,7 @@ public class ESCPOSPrinter {
         if (printerName != null && !printerName.isEmpty()) {
             return printerName;
         }
-        // Si printerPath no es un path de Linux, usarlo como nombre de impresora
+
         if (printerPath != null && !printerPath.startsWith("/dev/")) {
             return printerPath;
         }
