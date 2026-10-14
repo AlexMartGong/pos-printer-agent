@@ -6,13 +6,16 @@
   <arguments>-Xmx256m -jar "%BASE%\pos-printer-agent.jar"</arguments>
   <workingdirectory>%BASE%</workingdirectory>
 
-  <!-- Logging -->
+  <!-- Logging: rotacion por tamano de pos-printer-agent.out.log (logs del agente, con fecha y hora)
+       y pos-printer-agent.err.log. sizeThreshold esta en KB: 10240 KB = 10 MB por archivo,
+       se conservan los 5 archivos mas recientes de cada uno (~50 MB maximo) -->
   <log mode="roll-by-size">
     <sizeThreshold>10240</sizeThreshold>
-    <keepFiles>3</keepFiles>
+    <keepFiles>5</keepFiles>
   </log>
 
-  <!-- Auto restart on failure -->
+  <!-- Auto restart on failure (incluye la salida con codigo 3 por impresion colgada,
+       ver printer.stuckExitSeconds) -->
   <onfailure action="restart" delay="10 sec"/>
   <onfailure action="restart" delay="20 sec"/>
   <onfailure action="restart" delay="30 sec"/>

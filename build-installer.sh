@@ -53,7 +53,8 @@ fi
     --app-version "1.0.0" \
     --vendor "La Pasadita" \
     --description "Agente de impresion para terminales POS" \
-    --java-options "-Xmx256m"
+    --java-options "-Xmx256m" \
+    --java-options "--add-opens=java.desktop/sun.print=ALL-UNNAMED"
 
 echo ""
 echo "=== Instalador creado exitosamente ==="

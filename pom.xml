@@ -78,6 +78,10 @@
                         <manifest>
                             <mainClass>com.pasadita.pos.POSPrinterAgent</mainClass>
                         </manifest>
+                        <manifestEntries>
+                            <!-- Permite refrescar la cache de impresoras de la JDK en Windows (ver ESCPOSPrinter) -->
+                            <Add-Opens>java.desktop/sun.print</Add-Opens>
+                        </manifestEntries>
                     </archive>
                     <descriptorRefs>
                         <descriptorRef>jar-with-dependencies</descriptorRef>

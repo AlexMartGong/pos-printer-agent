@@ -74,16 +74,43 @@ Key properties in `config.properties`:
 - `scale.port` - Serial port for Torrey scale (`/dev/ttyACM0` on Linux, `COM1` on Windows)
 - `scale.enabled` - Enable/disable scale REST server (true/false)
 - `scale.autoConnect` - Auto-connect to scale on startup (true/false)
+- `printer.stuckExitSeconds` - If one print/drawer job runs longer than this, the agent exits with code 3 so WinSW restarts it (default `120`, `0` disables)
 
 ## Architecture
 
 ### Core Components
 
 **POSPrinterAgent** (`src/main/java/com/pasadita/pos/POSPrinterAgent.java`)
-- Main class extending `WebSocketClient`
-- Manages WebSocket connection to backend with auto-reconnect
-- Receives JSON ticket messages, deserializes with Jackson, and sends to printer
-- Sends confirmation messages back to server (`CONNECTED`, `PRINT_RESULT`)
+- Main class. Does **not** extend `WebSocketClient`: the inner `AgentSocket extends WebSocketClient` is a
+  single-use client that delegates its callbacks to the agent, and **every connection attempt creates a new one**.
+  Never call Java-WebSocket's `reconnect()` (throws `IllegalStateException` from the library's own threads) nor
+  `connectBlocking(timeout)`: on timeout it, like `reconnect()`, goes through `reset()`, which waits on
+  `closeBlocking()` with no timeout
+- **Connection / reconnection** — everything runs on one scheduler thread (`ws-reconnect`), the only place that creates
+  and connects clients, so two attempts never run in parallel:
+  - `scheduleConnect` is guarded by `AtomicBoolean connectScheduled` (`compareAndSet`): at most one pending attempt.
+    Before this guard, a failed connect (Java-WebSocket calls `onError` **and** `onClose(-1)`) scheduled two
+    reconnections, doubling every 5 s; leftovers later tore down healthy connections
+  - `connectAttempt` unlinks and discards the previous client (`close()` + closing its socket to abort a hung
+    handshake), creates a client with a 10 s TCP connect timeout and `setConnectionLostTimeout(30)`, calls `connect()`
+    and waits up to 20 s on its own latch (opened or closed). Wrapped in `catch (Throwable)` → reschedules
+  - Backoff 5 → 10 → 20 → 30 s (cap), retries forever, reset on `onOpen`. `start()` schedules the first attempt with
+    delay 0, so a boot without network (Windows service starting before the NIC) just keeps retrying
+  - Only `onClose` schedules reconnections (`onError` only logs; the library always follows it with `onClose`).
+    Safety net: `ensureConnected` every 30 s on the same thread schedules one if there's no open connection and no
+    pending attempt
+  - Callbacks from discarded clients are ignored by identity (`client != current`); a discarded client that opens
+    late is closed
+  - Connection-lost detection: Java-WebSocket closes with 1006 when no pong arrives within 1.5 × 30 s = 45 s (checked
+    every 30 s → detected in 45–60 s). Pings from the backend (every 25 s) are answered automatically
+- **Message processing**: the WebSocket thread only enqueues (`onMessage` → `messageWorker.execute`). A single-thread
+  `ThreadPoolExecutor` (`print-worker`) processes tickets and `OPEN_DRAWER` in arrival order, so a slow printer never
+  stops the socket from reading messages and answering pings
+- **Watchdog** (`print-watchdog`): `runTimed` wraps every print/drawer job, logs start, end and duration, warns every
+  15 s while it runs, and once it exceeds `printer.stuckExitSeconds` logs an error and calls `System.exit(3)` (backstop
+  `Runtime.halt(3)` after 20 s) so WinSW restarts the service (`onfailure`). A hung job would otherwise block every
+  later ticket and drawer command while the socket still looks healthy to the backend
+- Sends `CONNECTED` on open and `PRINT_RESULT` after each ticket (printer errors travel in `error` with `success=false`)
 - Starts the scale REST server if enabled
 
 **ESCPOSPrinter** (`src/main/java/com/pasadita/pos/ESCPOSPrinter.java`)
@@ -95,7 +122,18 @@ Key properties in `config.properties`:
   - **Linux**: Writes directly to device file (`/dev/usb/lpX`) - no driver required
   - **Windows**: Uses Java PrintService with installed printer name - stable, no port changes
 - Supports 80mm thermal printers (42 chars/line), PC850 charset for Spanish
-- `openCashDrawer()`: opens the cash drawer standalone (no ticket), sending only the ESC/POS drawer-kick pulse (`{27,112,0,25,250}`) through the same cross-platform path as `print()`
+- `openCashDrawer()`: opens the cash drawer standalone (no ticket), sending only the ESC/POS drawer-kick pulse (`{27,112,0,25,250}`) through the same cross-platform path as `print()`. Throws `PrinterException`; the agent logs the result (no confirmation message in the protocol)
+- **Windows lookup per job** (`resolveWindowsPrintService`): before every job it refreshes the JDK's printer cache and
+  looks the printer up by name — exact match (case-insensitive) first, then a partial match only if it is unique;
+  otherwise a `PrinterException` lists the installed printers ("no encontrada" / "nombre ambiguo")
+- **JDK printer cache** (`JdkPrintServiceCache`): on Windows `PrintServiceLookup` returns a cache refreshed only by a
+  native `PrinterListener` thread that exits without retry if the spooler restarts or wasn't ready at JVM start,
+  freezing the list until the JVM restarts. The agent calls the private
+  `sun.print.PrintServiceLookupProvider.refreshServices()` via reflection, which needs
+  `--add-opens java.desktop/sun.print=ALL-UNNAMED`: provided by the `Add-Opens` manifest entry (`java -jar`, used by
+  WinSW) and by `--java-options` in `build-installer.*` (jpackage). If inaccessible it warns once and uses the plain lookup
+- **Linux**: checks the device exists and is writable before writing, with explicit error messages
+- All logging via SLF4J (no `System.out`)
 
 **Scale Integration** (`src/main/java/com/pasadita/pos/scale/`)
 - **TorreyScaleController**: Serial communication with Torrey PCR series scales via jSerialComm
@@ -114,10 +152,11 @@ Key properties in `config.properties`:
 ### Data Flow
 
 1. Backend creates sale/delivery order and sends ticket JSON via WebSocket
-2. `POSPrinterAgent.onMessage()` reads the JSON tree first: if `type=OPEN_DRAWER` it calls `ESCPOSPrinter.openCashDrawer()` and returns; otherwise it deserializes `TicketDTO` with Jackson
-3. `ESCPOSPrinter.print()` generates ESC/POS byte commands
-4. Commands written directly to printer device (e.g., `/dev/usb/lp0`)
-5. Confirmation JSON sent back to server with success/error status
+2. `AgentSocket.onMessage()` (WebSocket thread) only enqueues the message on the `print-worker` thread
+3. The worker reads the JSON tree first: if `type=OPEN_DRAWER` it calls `ESCPOSPrinter.openCashDrawer()` and returns; otherwise it deserializes `TicketDTO` with Jackson
+4. `ESCPOSPrinter.print()` generates ESC/POS byte commands
+5. Commands written to the printer device (Linux, e.g. `/dev/usb/lp0`) or to the Windows printer resolved by name
+6. Confirmation JSON sent back to server with success/error status
 
 ### WebSocket Protocol
 
@@ -139,7 +178,7 @@ Key properties in `config.properties`:
   ```json
   {"type":"OPEN_DRAWER","timestamp":"2025-01-12T14:30:00Z"}
   ```
-  Sent by the backend when a cash payment is collected but no ticket is printed. `onMessage` inspects the `type` node before deserializing; messages with `type=OPEN_DRAWER` trigger `ESCPOSPrinter.openCashDrawer()`, anything else is parsed as a `TicketDTO`.
+  Sent by the backend when a cash payment is collected but no ticket is printed. The worker inspects the `type` node before deserializing; messages with `type=OPEN_DRAWER` trigger `ESCPOSPrinter.openCashDrawer()`, anything else is parsed as a `TicketDTO`.
 
 ### Ticket Type Detection
 
@@ -168,6 +207,18 @@ sudo usermod -a -G dialout $USER
 # Then logout/login
 ```
 
+## Logging
+
+- Provider: `slf4j-simple`, configured in `src/main/resources/simplelogger.properties`: everything goes to **stdout**
+  with date/time (`yyyy-MM-dd HH:mm:ss.SSS`) and thread name; `org.java_websocket` at `warn`
+- As a Windows service, logs land in `pos-printer-agent.out.log` next to the exe. WinSW rotates it by size
+  (`service/pos-printer-agent.xml`: `roll-by-size`, 10240 KB per file, 5 files kept)
+- Logged events: each connection attempt (`Intento de conexión #n`) and the next delay, connection established (attempt
+  number, seconds offline), close (code, reason, `remota`), message received/enqueued and then processed (type,
+  ticketId, time waited in queue), start/end/duration of each print and drawer opening, slow-job warnings every 15 s,
+  `PRINT_RESULT` sent
+- Thread names in the logs: `ws-reconnect`, `WebSocketConnectReadThread-N`, `print-worker`, `print-watchdog`
+
 ## Dependencies
 
 - Java 17+
@@ -193,10 +244,13 @@ Configuration can be set via environment variables (takes precedence over `confi
 | `SCALE_PORT` | `scale.port` | Serial port for scale |
 | `SCALE_ENABLED` | `scale.enabled` | Enable scale REST server |
 | `SCALE_AUTO_CONNECT` | `scale.autoConnect` | Auto-connect scale on startup |
+| `PRINTER_STUCK_EXIT_SECONDS` | `printer.stuckExitSeconds` | Exit (code 3) when a print job hangs longer than this; `0` disables (default `120`) |
 
 ## Key Design Patterns
 
-- **Auto-reconnection**: 5-second delay retry on WebSocket disconnect/error
+- **Auto-reconnection**: single scheduler thread, one pending attempt at most, a fresh client per attempt, backoff 5–30 s, retries forever (see POSPrinterAgent)
+- **Ordered processing**: one worker thread for tickets and drawer commands; the WebSocket thread only enqueues
+- **Self-healing**: a print job stuck past `printer.stuckExitSeconds` exits the process (code 3) for WinSW to restart it
 - **Direct device I/O**: Printer accessed as file (`FileOutputStream`) for simplicity
 - **Character encoding**: ISO-8859-1 for ESC/POS, PC850 charset for Spanish characters
 - **Ticket width**: 42 characters for 80mm printers
@@ -207,7 +261,7 @@ Configuration can be set via environment variables (takes precedence over `confi
 
 ```
 src/main/java/com/pasadita/pos/
-├── POSPrinterAgent.java      # Main class, WebSocket client
+├── POSPrinterAgent.java      # Main class: connection supervisor, message worker, watchdog
 ├── ESCPOSPrinter.java        # ESC/POS command generator
 ├── dto/
 │   ├── TicketDTO.java        # Ticket data transfer object

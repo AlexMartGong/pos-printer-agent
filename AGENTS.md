@@ -9,9 +9,9 @@ This document summarizes essential knowledge and actionable conventions for AI a
 ### 1. Architecture & Major Components
 
 - **POSPrinterAgent** (`src/main/java/com/pasadita/pos/POSPrinterAgent.java`):
-  - Main entry point. Extends `WebSocketClient`.
-  - Handles WebSocket connection to backend, auto-reconnects on failure.
-  - Receives ticket JSON, deserializes with Jackson, prints via `ESCPOSPrinter`.
+  - Main entry point. Does not extend `WebSocketClient`: the inner `AgentSocket` is a single-use client and every connection attempt creates a new one (never call the library's `reconnect()`/`connectBlocking(timeout)`).
+  - Reconnection runs only on the `ws-reconnect` scheduler thread: at most one pending attempt (`AtomicBoolean` guard), backoff 5→10→20→30 s, retries forever, 30 s connection-lost timeout, 30 s safety-net check. Works when the first connection fails at boot.
+  - The WebSocket thread only enqueues messages; a single `print-worker` thread processes tickets and `OPEN_DRAWER` in order. A watchdog warns every 15 s on slow jobs and exits with code 3 past `printer.stuckExitSeconds` (default 120) so WinSW restarts the service.
   - Sends confirmation JSON back to backend (`CONNECTED`, `PRINT_RESULT`).
   - Starts scale REST server if enabled.
 
@@ -20,7 +20,8 @@ This document summarizes essential knowledge and actionable conventions for AI a
   - Detects ticket type (cash register vs delivery) based on `deliveryOrderId` and `deliveryAddress`.
   - Cross-platform: Direct device file on Linux, Java PrintService on Windows.
   - 80mm printer support (42 chars/line), PC850 charset for Spanish.
-  - `openCashDrawer()`: opens the cash drawer with no ticket, emitting only the ESC/POS drawer-kick pulse (`{27,112,0,25,250}`) over the same cross-platform path as `print()`. Fire-and-forget: errors are logged, not propagated.
+  - `openCashDrawer()`: opens the cash drawer with no ticket, emitting only the ESC/POS drawer-kick pulse (`{27,112,0,25,250}`) over the same cross-platform path as `print()`. Throws `PrinterException`; the agent logs the result (no confirmation message).
+  - Windows: resolves the printer by name on every job (exact match first, partial only if unique) after refreshing the JDK's printer cache via reflection (`Add-Opens java.desktop/sun.print`, see CLAUDE.md).
 
 - **Scale Integration** (`src/main/java/com/pasadita/pos/scale/`):
   - `TorreyScaleController`: Serial comms with Torrey PCR scales (jSerialComm).
@@ -47,7 +48,7 @@ This document summarizes essential knowledge and actionable conventions for AI a
 ### 2. Data Flow & Protocols
 
 - Backend sends ticket JSON via WebSocket → `POSPrinterAgent` → `ESCPOSPrinter` → printer device.
-- `onMessage` reads the JSON tree first: a `{"type":"OPEN_DRAWER",...}` command kicks the cash drawer via `ESCPOSPrinter.openCashDrawer()` (no ticket, no confirmation); any other message is deserialized to `TicketDTO` and printed.
+- `onMessage` only enqueues; the `print-worker` thread reads the JSON tree first: a `{"type":"OPEN_DRAWER",...}` command kicks the cash drawer via `ESCPOSPrinter.openCashDrawer()` (no ticket, no confirmation); any other message is deserialized to `TicketDTO` and printed.
 - Confirmation JSON sent back to backend after print attempt.
 - Ticket type detection logic in `ESCPOSPrinter.isDeliveryOrder()`:
   - Delivery: `deliveryOrderId != null && deliveryAddress != null && !deliveryAddress.isEmpty()`
@@ -73,7 +74,7 @@ This document summarizes essential knowledge and actionable conventions for AI a
 ### 4. Configuration & Environment
 
 - **Config priority:** ENV vars > `config.properties` > defaults
-- **Key ENV vars:** `SERVER_URL`, `STATION_ID`, `PRINTER_PATH`, `PRINTER_NAME`, `BUSINESS_NAME`, `BUSINESS_ADDRESS`, `BUSINESS_PHONE`, `SCALE_PORT`, `SCALE_ENABLED`, `SCALE_AUTO_CONNECT`
+- **Key ENV vars:** `SERVER_URL`, `STATION_ID`, `PRINTER_PATH`, `PRINTER_NAME`, `BUSINESS_NAME`, `BUSINESS_ADDRESS`, `BUSINESS_PHONE`, `SCALE_PORT`, `SCALE_ENABLED`, `SCALE_AUTO_CONNECT`, `PRINTER_STUCK_EXIT_SECONDS`
 - **Linux permissions:**
   - Printer: Add user to `lp` group or `chmod 666 /dev/usb/lp0`
   - Scale: Add user to `dialout` group
@@ -82,7 +83,8 @@ This document summarizes essential knowledge and actionable conventions for AI a
 
 ### 5. Project Patterns & Conventions
 
-- **Auto-reconnect:** 5s delay on WebSocket disconnect/error.
+- **Auto-reconnect:** single scheduler thread, one pending attempt at most, fresh client per attempt, backoff 5–30 s.
+- **Logging:** `slf4j-simple` configured in `src/main/resources/simplelogger.properties` (stdout, date/time, thread name) → `pos-printer-agent.out.log` under WinSW, rotated by size.
 - **Direct device I/O:** Printer accessed as file on Linux for simplicity.
 - **Character encoding:** ISO-8859-1 for ESC/POS, PC850 for Spanish.
 - **Ticket width:** 42 chars for 80mm printers.

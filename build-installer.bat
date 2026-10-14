@@ -65,7 +65,8 @@ echo [3/3] Generando instalador con jpackage...
     --win-shortcut ^
     --win-menu ^
     --win-menu-group "La Pasadita" ^
-    --java-options "-Xmx256m"
+    --java-options "-Xmx256m" ^
+    --java-options "--add-opens=java.desktop/sun.print=ALL-UNNAMED"
 
 if errorlevel 1 (
     echo ERROR: Fallo jpackage
