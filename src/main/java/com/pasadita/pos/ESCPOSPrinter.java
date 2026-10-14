@@ -2,21 +2,31 @@ package com.pasadita.pos;
 
 import com.pasadita.pos.dto.SaleDetailDTO;
 import com.pasadita.pos.dto.TicketDTO;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.print.*;
 import javax.print.attribute.HashPrintRequestAttributeSet;
 import javax.print.attribute.PrintRequestAttributeSet;
+import javax.print.attribute.standard.JobName;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
 
 public class ESCPOSPrinter {
+    private static final Logger log = LoggerFactory.getLogger(ESCPOSPrinter.class);
+
     private static final String DEFAULT_PRINTER_PATH = "/dev/usb/lp0";
 
     private static final boolean IS_WINDOWS = System.getProperty("os.name").toLowerCase().contains("windows");
@@ -74,41 +84,41 @@ public class ESCPOSPrinter {
     }
 
     public void print(TicketDTO ticket) throws PrinterException, IOException {
-
-        byte[] commands = generateESCPOS(ticket);
-
-        if (IS_WINDOWS) {
-            printToWindowsPrinter(commands, "Ticket #" + ticket.getId());
-        } else {
-            printToLinuxDevice(commands, "Ticket #" + ticket.getId());
-        }
+        send(generateESCPOS(ticket), "Ticket #" + ticket.getId());
     }
 
-    public void openCashDrawer() {
-        try {
-            if (IS_WINDOWS) {
-                printToWindowsPrinter(OPEN_DRAWER, "Apertura de cajon");
-            } else {
-                printToLinuxDevice(OPEN_DRAWER, "Apertura de cajon");
-            }
-            System.out.println("[OK] Cajon abierto correctamente");
-        } catch (PrinterException e) {
-            System.err.println("[ERROR] No se pudo abrir el cajon: " + e.getMessage());
+    /**
+     * Abre el cajón sin imprimir: solo envía el pulso ESC/POS. Lanza {@link PrinterException}
+     * si la impresora no está disponible; el llamador registra el resultado.
+     */
+    public void openCashDrawer() throws PrinterException {
+        send(OPEN_DRAWER, "Apertura de cajon");
+    }
+
+    private void send(byte[] data, String description) throws PrinterException {
+        if (IS_WINDOWS) {
+            printToWindowsPrinter(data, description);
+        } else {
+            printToLinuxDevice(data, description);
         }
     }
 
     private void printToLinuxDevice(byte[] data, String description) throws PrinterException {
-        deviceLock.lock();
-        try {
+        File device = new File(printerPath);
+        if (!device.exists()) {
+            throw new PrinterException("El dispositivo " + printerPath + " no existe (¿impresora apagada o desconectada?)");
+        }
+        if (!device.canWrite()) {
+            throw new PrinterException("Sin permiso de escritura en " + printerPath + " (agrega el usuario al grupo lp)");
+        }
 
-            try (FileOutputStream fos = new FileOutputStream(printerPath)) {
-                fos.write(data);
-                fos.flush();
-                System.out.println("[OK] " + description + " enviado a impresora correctamente");
-            } catch (IOException e) {
-                System.err.println("[ERROR] Error escribiendo a impresora: " + e.getMessage());
-                throw new PrinterException("No se pudo escribir en " + printerPath + ": " + e.getMessage(), e);
-            }
+        deviceLock.lock();
+        try (FileOutputStream fos = new FileOutputStream(device)) {
+            fos.write(data);
+            fos.flush();
+            log.debug("{} enviado a {} ({} bytes)", description, printerPath, data.length);
+        } catch (IOException e) {
+            throw new PrinterException("No se pudo escribir en " + printerPath + ": " + e.getMessage(), e);
         } finally {
             deviceLock.unlock();
         }
@@ -117,25 +127,19 @@ public class ESCPOSPrinter {
     private void printToWindowsPrinter(byte[] data, String description) throws PrinterException {
         deviceLock.lock();
         try {
-            String effectivePrinterName = getEffectivePrinterName();
-
-            PrintService printService = findPrintService(effectivePrinterName);
-            if (printService == null) {
-                throw new PrinterException("Impresora no encontrada: " + effectivePrinterName +
-                        ". Impresoras disponibles: " + getAvailablePrinters());
-            }
+            // Se resuelve en cada impresión: la impresora puede reconectarse o el spooler reiniciarse
+            PrintService printService = resolveWindowsPrintService();
 
             try {
                 DocPrintJob printJob = printService.createPrintJob();
-                DocFlavor flavor = DocFlavor.BYTE_ARRAY.AUTOSENSE;
-                Doc doc = new SimpleDoc(data, flavor, null);
+                Doc doc = new SimpleDoc(data, DocFlavor.BYTE_ARRAY.AUTOSENSE, null);
                 PrintRequestAttributeSet attributes = new HashPrintRequestAttributeSet();
+                attributes.add(new JobName(description, null));
 
                 printJob.print(doc, attributes);
-                System.out.println("[OK] " + description + " enviado a impresora correctamente");
+                log.debug("{} enviado a '{}' ({} bytes)", description, printService.getName(), data.length);
             } catch (javax.print.PrintException e) {
-                System.err.println("[ERROR] Error de impresión: " + e.getMessage());
-                throw new PrinterException("Error al imprimir en " + effectivePrinterName + ": " + e.getMessage(), e);
+                throw new PrinterException("Error al imprimir en " + printService.getName() + ": " + e.getMessage(), e);
             }
         } finally {
             deviceLock.unlock();
@@ -153,28 +157,97 @@ public class ESCPOSPrinter {
         return null;
     }
 
-    private PrintService findPrintService(String printerName) {
-        if (printerName == null) {
-            return null;
+    /**
+     * Busca la impresora configurada entre las instaladas en Windows: primero por nombre exacto
+     * (sin distinguir mayúsculas) y, si no hay, por coincidencia parcial solo cuando es única.
+     */
+    private PrintService resolveWindowsPrintService() throws PrinterException {
+        String name = getEffectivePrinterName();
+        if (name == null) {
+            throw new PrinterException("printer.name no configurado. Impresoras disponibles: " + getAvailablePrinters());
         }
+
+        JdkPrintServiceCache.refresh();
         PrintService[] services = PrintServiceLookup.lookupPrintServices(null, null);
+
+        String lowerName = name.toLowerCase(Locale.ROOT);
+        List<PrintService> partialMatches = new ArrayList<>();
         for (PrintService service : services) {
-            if (service.getName().equalsIgnoreCase(printerName) ||
-                    service.getName().toLowerCase().contains(printerName.toLowerCase())) {
+            if (service.getName().equalsIgnoreCase(name)) {
                 return service;
             }
+            if (service.getName().toLowerCase(Locale.ROOT).contains(lowerName)) {
+                partialMatches.add(service);
+            }
         }
-        return null;
+
+        if (partialMatches.size() == 1) {
+            return partialMatches.get(0);
+        }
+        if (partialMatches.isEmpty()) {
+            throw new PrinterException("Impresora '" + name + "' no encontrada en Windows. Impresoras disponibles: "
+                    + describe(Arrays.asList(services)));
+        }
+        throw new PrinterException("Nombre de impresora ambiguo '" + name + "': coincide con "
+                + describe(partialMatches) + ". Configura el nombre exacto en printer.name");
     }
 
     public String getAvailablePrinters() {
-        PrintService[] services = PrintServiceLookup.lookupPrintServices(null, null);
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < services.length; i++) {
-            if (i > 0) sb.append(", ");
-            sb.append(services[i].getName());
+        return describe(Arrays.asList(PrintServiceLookup.lookupPrintServices(null, null)));
+    }
+
+    private static String describe(List<PrintService> services) {
+        if (services.isEmpty()) {
+            return "(ninguna)";
         }
-        return sb.toString();
+        return services.stream().map(PrintService::getName).collect(Collectors.joining(", "));
+    }
+
+    /**
+     * En Windows la JDK cachea la lista de impresoras y solo la refresca desde un hilo nativo
+     * (PrinterListener) que termina sin reintentar si el spooler se reinicia o no estaba listo
+     * cuando la JVM consultó por primera vez: la lista queda congelada hasta reiniciar la JVM.
+     * Por eso se fuerza el refresco antes de cada búsqueda. Requiere
+     * {@code --add-opens java.desktop/sun.print} (Add-Opens en el manifest del JAR y opción de
+     * jpackage); si no es accesible se avisa una sola vez y se usa la lista tal cual.
+     */
+    private static final class JdkPrintServiceCache {
+        private static final Object PROVIDER;
+        private static final Method REFRESH_SERVICES;
+
+        static {
+            Object provider = null;
+            Method refreshServices = null;
+            try {
+                // Garantiza que el proveedor de la JDK ya esté instanciado
+                PrintServiceLookup.lookupPrintServices(null, null);
+                Class<?> providerClass = Class.forName("sun.print.PrintServiceLookupProvider");
+                provider = providerClass.getMethod("getWin32PrintLUS").invoke(null);
+                refreshServices = providerClass.getDeclaredMethod("refreshServices");
+                refreshServices.setAccessible(true);
+                if (provider == null) {
+                    log.warn("Proveedor de impresoras de la JDK no inicializado - no se puede refrescar su caché");
+                }
+            } catch (Exception | LinkageError e) {
+                log.warn("No se puede refrescar la caché de impresoras de la JDK ({}). Si el spooler se reinicia, "
+                        + "puede hacer falta reiniciar el agente. ¿Falta --add-opens java.desktop/sun.print=ALL-UNNAMED?",
+                        e.toString());
+                provider = null;
+            }
+            PROVIDER = provider;
+            REFRESH_SERVICES = provider != null ? refreshServices : null;
+        }
+
+        static void refresh() {
+            if (REFRESH_SERVICES == null) {
+                return;
+            }
+            try {
+                REFRESH_SERVICES.invoke(PROVIDER);
+            } catch (Exception e) {
+                log.warn("Falló el refresco de la caché de impresoras de la JDK: {}", e.toString());
+            }
+        }
     }
 
     private boolean isDeliveryOrder(TicketDTO ticket) {
@@ -592,17 +665,18 @@ public class ESCPOSPrinter {
 
         buffer.write(CUT_PAPER_FEED);
 
-        if (IS_WINDOWS) {
-            printToWindowsPrinter(buffer.toByteArray(), "Pagina de prueba");
-        } else {
-            printToLinuxDevice(buffer.toByteArray(), "Pagina de prueba");
-        }
+        send(buffer.toByteArray(), "Pagina de prueba");
     }
 
     public boolean isAvailable() {
         if (IS_WINDOWS) {
-            String effectiveName = getEffectivePrinterName();
-            return effectiveName != null && findPrintService(effectiveName) != null;
+            try {
+                resolveWindowsPrintService();
+                return true;
+            } catch (PrinterException e) {
+                log.warn(e.getMessage());
+                return false;
+            }
         } else {
             File printerDevice = new File(printerPath);
             return printerDevice.exists() && printerDevice.canWrite();
