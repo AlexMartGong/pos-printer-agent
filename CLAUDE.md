@@ -35,11 +35,12 @@ java -jar target/pos-printer-agent.jar
 java -jar target/pos-printer-agent.jar /path/to/config.properties
 
 # Print test page and exit (also kicks the cash drawer)
-java -jar target/pos-printer-agent.jar config.properties --test
+java -jar target/pos-printer-agent.jar --test
+java -jar target/pos-printer-agent.jar /path/to/config.properties --test
 ```
-`--test` (or `-t`) is recognized in any position, but `args[0]` is always read as the config file:
-`java -jar target/pos-printer-agent.jar --test` alone tries to load a file named `--test`, fails, and runs with
-ENV/defaults only (on Windows that means no `printer.name`). Pass the config path first.
+`--test` (or `-t`) can go in any position. The config file is the first argument that isn't `--test`/`-t`
+(default `config.properties` in the working directory); further arguments are ignored. A missing file is logged by
+name and the agent runs with ENV/defaults.
 
 ### Build Installer (jpackage)
 ```bash
@@ -114,7 +115,8 @@ falls through to the next level. Every key, its env var and its default are in [
   Never call Java-WebSocket's `reconnect()` (throws `IllegalStateException` from the library's own threads) nor
   `connectBlocking(timeout)`: on timeout it, like `reconnect()`, goes through `reset()`, which waits on
   `closeBlocking()` with no timeout
-- **Startup** (`main`): loads the config and logs the effective values, handles `--test`, creates the `ESCPOSPrinter`
+- **Startup** (`main`): splits the arguments (`--test`/`-t` flag vs. config path, any order), loads the config and
+  logs the effective values, handles `--test`, creates the `ESCPOSPrinter`
   (logs `isAvailable()`), starts `ScaleRestServer` (if that fails it is logged and the agent continues without REST),
   registers the shutdown hook, calls `start()` and blocks on `awaitTermination()`. An invalid server URL exits with code 1
 - **Connection / reconnection** — everything runs on one scheduler thread (`ws-reconnect`), the only place that creates

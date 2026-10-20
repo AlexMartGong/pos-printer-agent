@@ -69,7 +69,7 @@ This document summarizes essential knowledge and actionable conventions for AI a
   - No automated tests exist (`src/test` is absent): verify by building and, with hardware, printing the test page.
 - **Run:**
   - `java -jar target/pos-printer-agent.jar [config.properties] [--test|-t]`
-  - The first argument is always read as the config file, so pass it before `--test`; `--test` alone runs with ENV/defaults only.
+  - Any order: the config file is the first argument that isn't `--test`/`-t` (default `./config.properties`).
 - **Installer (jpackage, bundles Java):**
   - `build-installer.bat` (Windows `.exe`) or `./build-installer.sh` (Linux `.deb` / macOS `.dmg`). Needs `JAVA_HOME` on a JDK 17+.
 - **Windows Service Package:**
@@ -145,7 +145,7 @@ pos-printer-agent/
 
 ### 8. Examples
 
-- **Print test page:** `java -jar target/pos-printer-agent.jar config.properties --test`
+- **Print test page:** `java -jar target/pos-printer-agent.jar --test` (or `... /path/to/config.properties --test`)
 - **Custom config:** `java -jar target/pos-printer-agent.jar /path/to/config.properties`
 - **Linux printer permissions:** `sudo usermod -a -G lp $USER` or `sudo chmod 666 /dev/usb/lp0`
 

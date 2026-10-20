@@ -549,7 +549,20 @@ public class POSPrinterAgent {
         log.info("    POS PRINTER AGENT - LA PASADITA");
         log.info("============================================");
 
-        Properties fileConfig = loadPropertiesFile(args.length > 0 ? args[0] : "config.properties");
+        // El archivo de configuración es el primer argumento que no sea --test/-t, en cualquier orden
+        String configFile = "config.properties";
+        boolean configFileGiven = false;
+        boolean testMode = false;
+        for (String arg : args) {
+            if (isTestFlag(arg)) {
+                testMode = true;
+            } else if (!configFileGiven) {
+                configFile = arg;
+                configFileGiven = true;
+            }
+        }
+
+        Properties fileConfig = loadPropertiesFile(configFile);
 
         String serverUrl = getConfig("SERVER_URL", "server.url", fileConfig, DEFAULT_SERVER_URL);
         String stationId = getConfig("STATION_ID", "station.id", fileConfig, DEFAULT_STATION_ID);
@@ -587,20 +600,18 @@ public class POSPrinterAgent {
         log.info("  Scale Auto-Connect: {}", scaleAutoConnect);
         log.info("============================================");
 
-        for (String arg : args) {
-            if ("--test".equals(arg) || "-t".equals(arg)) {
-                ESCPOSPrinter testPrinter = new ESCPOSPrinter(businessName, businessAddress, businessPhone, printerPath, printerName);
-                try {
-                    log.info("Imprimiendo página de prueba...");
-                    testPrinter.printTestPage();
-                    log.info("Página de prueba impresa correctamente");
-                } catch (IOException e) {
-                    log.error("Error imprimiendo página de prueba: {}", e.getMessage());
-                } catch (ESCPOSPrinter.PrinterException e) {
-                    log.error("Error de impresora: {}", e.getMessage());
-                }
-                return;
+        if (testMode) {
+            ESCPOSPrinter testPrinter = new ESCPOSPrinter(businessName, businessAddress, businessPhone, printerPath, printerName);
+            try {
+                log.info("Imprimiendo página de prueba...");
+                testPrinter.printTestPage();
+                log.info("Página de prueba impresa correctamente");
+            } catch (IOException e) {
+                log.error("Error imprimiendo página de prueba: {}", e.getMessage());
+            } catch (ESCPOSPrinter.PrinterException e) {
+                log.error("Error de impresora: {}", e.getMessage());
             }
+            return;
         }
 
         ESCPOSPrinter printer = new ESCPOSPrinter(businessName, businessAddress, businessPhone, printerPath, printerName);
@@ -645,6 +656,10 @@ public class POSPrinterAgent {
         }
     }
 
+    private static boolean isTestFlag(String arg) {
+        return "--test".equals(arg) || "-t".equals(arg);
+    }
+
     private static String getConfig(String envKey, String propKey, Properties props, String defaultValue) {
         String envValue = System.getenv(envKey);
         if (envValue != null && !envValue.isEmpty()) {
@@ -679,7 +694,7 @@ public class POSPrinterAgent {
             props.load(input);
             log.info("Configuración cargada desde: {}", configFile);
         } catch (IOException e) {
-            log.info("Archivo de configuración no encontrado, usando ENV/defaults");
+            log.info("Archivo de configuración {} no encontrado, usando ENV/defaults", configFile);
         }
 
         return props;
